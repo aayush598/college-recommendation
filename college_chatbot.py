@@ -18,9 +18,12 @@ import openai
 from dotenv import load_dotenv
 import os
 
+# Import the enhanced database manager
+from enhanced_college_chatbot import EnhancedDatabaseManager
+
 load_dotenv()
 
-OPENAI_API_KEY=os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DB_PATH = os.getenv("DB_PATH")
 EXCEL_PATH = os.getenv("EXCEL_PATH")
 
@@ -55,122 +58,6 @@ class College:
     scholarship: str
     admission_process: str
 
-class DatabaseManager:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.init_database()
-    
-    def init_database(self):
-        """Initialize the SQLite database for session management"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Create sessions table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Create messages table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                message_type TEXT,
-                content TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (session_id) REFERENCES sessions (session_id)
-            )
-        ''')
-        
-        # Create user preferences table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_preferences (
-                session_id TEXT PRIMARY KEY,
-                preferences TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (session_id) REFERENCES sessions (session_id)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def create_session(self, session_id: str):
-        """Create a new session"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT OR IGNORE INTO sessions (session_id) VALUES (?)',
-            (session_id,)
-        )
-        conn.commit()
-        conn.close()
-    
-    def save_message(self, session_id: str, message_type: str, content: str):
-        """Save a message to the database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT INTO messages (session_id, message_type, content) VALUES (?, ?, ?)',
-            (session_id, message_type, content)
-        )
-        cursor.execute(
-            'UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?',
-            (session_id,)
-        )
-        conn.commit()
-        conn.close()
-    
-    def get_session_messages(self, session_id: str) -> List[Dict]:
-        """Retrieve all messages for a session"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            'SELECT message_type, content, timestamp FROM messages WHERE session_id = ? ORDER BY timestamp',
-            (session_id,)
-        )
-        messages = cursor.fetchall()
-        conn.close()
-        
-        return [
-            {
-                'type': msg[0],
-                'content': msg[1],
-                'timestamp': msg[2]
-            }
-            for msg in messages
-        ]
-    
-    def save_preferences(self, session_id: str, preferences: dict):
-        """Save user preferences"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT OR REPLACE INTO user_preferences (session_id, preferences) VALUES (?, ?)',
-            (session_id, json.dumps(preferences))
-        )
-        conn.commit()
-        conn.close()
-    
-    def get_preferences(self, session_id: str) -> dict:
-        """Get user preferences"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            'SELECT preferences FROM user_preferences WHERE session_id = ?',
-            (session_id,)
-        )
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return json.loads(result[0])
-        return {}
-
 class CollegeDataManager:
     def __init__(self, excel_path: str):
         self.excel_path = excel_path
@@ -204,7 +91,7 @@ class CollegeDataManager:
             print(f"Error loading Excel data: {e}")
             return []
     
-    def filter_colleges_by_preferences(self, preferences: UserPreferences) -> List[College]:
+    def filter_colleges_by_preferences(self, preferences: UserPreferences) -> List[Dict]:
         """Filter colleges based on user preferences with strict matching"""
         matching_colleges = []
         
@@ -281,9 +168,9 @@ class CollegeDataManager:
         
         # Sort by match score
         matching_colleges.sort(key=lambda x: x['score'], reverse=True)
-        return matching_colleges[:3]  # Return top 10 matches
+        return matching_colleges[:3]  # Return top 3 matches
 
-class CollegeRecommendationChatbot:
+class EnhancedCollegeRecommendationChatbot:
     def __init__(self, api_key: str, excel_path: str, db_path: str):
         self.api_key = api_key
         openai.api_key = api_key
@@ -294,9 +181,9 @@ class CollegeRecommendationChatbot:
             openai_api_key=api_key
         )
         
-        self.db_manager = DatabaseManager(db_path)
+        self.db_manager = EnhancedDatabaseManager(db_path)
         self.data_manager = CollegeDataManager(excel_path)
-        self.sessions = {}
+        self.conversation_chains = {}  # Store conversation chains per session
         
         # Initialize preference extraction chain
         self.preference_parser = PydanticOutputParser(pydantic_object=UserPreferences)
@@ -378,7 +265,7 @@ Remember: Wait for the user to ask for recommendations before providing them!
         
         return LLMChain(llm=self.llm, prompt=detector_prompt)
     
-    def create_conversation_chain(self, session_id: str):
+    def create_conversation_chain(self, session_id: str, user_id: str):
         """Create a conversation chain with memory for a session"""
         memory = ConversationBufferWindowMemory(
             k=10,
@@ -386,7 +273,7 @@ Remember: Wait for the user to ask for recommendations before providing them!
         )
         
         # Load previous messages
-        previous_messages = self.db_manager.get_session_messages(session_id)
+        previous_messages = self.db_manager.get_session_messages(session_id, user_id)
         for msg in previous_messages[-10:]:  # Load last 10 messages
             if msg['type'] == 'human':
                 memory.chat_memory.add_user_message(msg['content'])
@@ -409,11 +296,11 @@ Remember: Wait for the user to ask for recommendations before providing them!
         
         return conversation
     
-    def extract_preferences_with_llm(self, session_id: str, current_message: str) -> UserPreferences:
+    def extract_preferences_with_llm(self, session_id: str, user_id: str, current_message: str) -> UserPreferences:
         """Extract user preferences using LangChain"""
         try:
             # Get conversation history
-            messages = self.db_manager.get_session_messages(session_id)
+            messages = self.db_manager.get_session_messages(session_id, user_id)
             conversation_history = "\n".join([
                 f"{msg['type'].title()}: {msg['content']}" for msg in messages[-10:]
             ])
@@ -430,7 +317,7 @@ Remember: Wait for the user to ask for recommendations before providing them!
                 
                 # Save preferences to database
                 pref_dict = preferences.dict()
-                self.db_manager.save_preferences(session_id, pref_dict)
+                self.db_manager.save_preferences(session_id, user_id, pref_dict)
                 
                 return preferences
             except OutputParserException as e:
@@ -443,7 +330,7 @@ Remember: Wait for the user to ask for recommendations before providing them!
         except Exception as e:
             print(f"Error extracting preferences: {e}")
             # Return previous preferences if available
-            prev_prefs = self.db_manager.get_preferences(session_id)
+            prev_prefs = self.db_manager.get_preferences(session_id, user_id)
             if prev_prefs:
                 return UserPreferences(**prev_prefs)
             return UserPreferences()
@@ -562,16 +449,50 @@ Remember: Wait for the user to ask for recommendations before providing them!
         
         return json.dumps({"college_recommendations": recommendations}, indent=2, ensure_ascii=False)
     
-    def chat(self, session_id: str, user_input: str) -> str:
-        """Main chat function with improved logic"""
-        # Create session if it doesn't exist
-        self.db_manager.create_session(session_id)
+    def generate_chat_title(self, first_message: str) -> str:
+        """Generate a meaningful title for the chat based on first message"""
+        try:
+            prompt = f"""
+            Create a short, meaningful title (max 30 characters) for a college recommendation chat based on this first message:
+            "{first_message}"
+            
+            Focus on the main topic or preference mentioned. Examples:
+            - "Engineering Colleges"
+            - "MBA in Delhi"
+            - "Medical Colleges Gujarat"
+            - "College Search Help"
+            
+            Return only the title, no quotes or extra text.
+            """
+            
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=50
+            )
+            
+            title = response.choices[0].message.content.strip()
+            return title[:30] if len(title) > 30 else title
+        except:
+            return "New Chat"
+    
+    def chat(self, session_id: str, user_id: str, user_input: str, is_new_chat: bool = False) -> str:
+        """Main chat function with user management"""
+        # Verify session ownership
+        if not self.db_manager.verify_session_ownership(session_id, user_id):
+            return "Error: You don't have access to this chat session."
         
         # Save user message
-        self.db_manager.save_message(session_id, 'human', user_input)
+        self.db_manager.save_message(session_id, user_id, 'human', user_input)
+        
+        # Generate and update chat title for new chats
+        if is_new_chat:
+            title = self.generate_chat_title(user_input)
+            self.db_manager.update_chat_title(session_id, title)
         
         # Extract preferences from current conversation
-        preferences = self.extract_preferences_with_llm(session_id, user_input)
+        preferences = self.extract_preferences_with_llm(session_id, user_id, user_input)
         
         # Check if user is asking for recommendations
         if self.is_asking_for_recommendations(user_input):
@@ -612,10 +533,11 @@ Remember: Wait for the user to ask for recommendations before providing them!
         
         else:
             # Regular conversation
-            if session_id not in self.sessions:
-                self.sessions[session_id] = self.create_conversation_chain(session_id)
+            session_key = f"{session_id}_{user_id}"
+            if session_key not in self.conversation_chains:
+                self.conversation_chains[session_key] = self.create_conversation_chain(session_id, user_id)
             
-            conversation = self.sessions[session_id]
+            conversation = self.conversation_chains[session_key]
             
             # Add context about extracted preferences if any
             context_info = ""
@@ -633,72 +555,10 @@ Remember: Wait for the user to ask for recommendations before providing them!
             final_response = context_info + conversation.predict(input=user_input)
         
         # Save AI response
-        self.db_manager.save_message(session_id, 'ai', final_response)
+        self.db_manager.save_message(session_id, user_id, 'ai', final_response)
         
         return final_response
     
-    def get_session_history(self, session_id: str) -> List[Dict]:
+    def get_session_history(self, session_id: str, user_id: str) -> List[Dict]:
         """Get complete chat history for a session"""
-        return self.db_manager.get_session_messages(session_id)
-
-# Example usage and testing
-def main():
-    # Initialize the chatbot
-    chatbot = CollegeRecommendationChatbot(
-        api_key=OPENAI_API_KEY,
-        excel_path=EXCEL_PATH,
-        db_path=DB_PATH
-    )
-    
-    # Example conversation
-    session_id = "user123"
-    
-    print("🎓 College Recommendation Chatbot")
-    print("=" * 50)
-    print("Hi! I'm here to help you find the perfect college.")
-    print("Tell me about your preferences, and when you're ready, ask me to recommend colleges!")
-    print("\nCommands:")
-    print("- Type 'quit' to exit")
-    print("- Type 'history' to see chat history")
-    print("- Type 'preferences' to see extracted preferences")
-    print()
-    
-    while True:
-        user_input = input("You: ").strip()
-        
-        if user_input.lower() == 'quit':
-            break
-        elif user_input.lower() == 'history':
-            history = chatbot.get_session_history(session_id)
-            print("\n📜 Chat History:")
-            for msg in history[-10:]:  # Show last 10 messages
-                print(f"{msg['type'].title()}: {msg['content'][:100]}...")
-                print(f"Time: {msg['timestamp']}")
-                print("-" * 30)
-            continue
-        elif user_input.lower() == 'preferences':
-            prefs = chatbot.db_manager.get_preferences(session_id)
-            print("\n🎯 Current Preferences:")
-            if prefs:
-                for key, value in prefs.items():
-                    if value:
-                        print(f"  {key}: {value}")
-            else:
-                print("  No preferences extracted yet.")
-            print()
-            continue
-        
-        if not user_input:
-            continue
-            
-        try:
-            response = chatbot.chat(session_id, user_input)
-            print(f"\n🤖 Bot: {response}")
-            print()
-        except Exception as e:
-            print(f"\n❌ Error: {e}")
-            print("Please try again or check your OpenAI API key.")
-            print()
-
-if __name__ == "__main__":
-    main()
+        return self.db_manager.get_session_messages(session_id, user_id)

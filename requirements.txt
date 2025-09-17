@@ -6,3 +6,4 @@ dataclasses
 langchain-community
 python-dotenv
 flask
+bcrypt
