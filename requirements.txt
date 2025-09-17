@@ -1,0 +1,8 @@
+langchain
+openai
+pandas
+openpyxl
+dataclasses
+langchain-community
+python-dotenv
+flask
